@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── TELEGRAM CONFIG (env overrides) ────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8802900336:AAH-kjC7LYFHu60nAkKfSCZqc28AiRrB89M")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8401097557"))
 
 # ─── ATTACK CONFIG ──────────────────────────────────────
