@@ -42,9 +42,9 @@ BEACON_URL = "https://performance.radar.cloudflare.com/api/beacon"
 BATCH_SIZE = 50  # Reduced for stability
 CONCURRENT_LIMIT = 100  # Reduced for stability
 REQUEST_DELAY = 0.2  # Increased for stability
-MAX_RETRIES = 2
-MAX_USAGE_PER_IP = 5
-TIMEOUT = 10
+MAX_RETRIES = 0
+MAX_USAGE_PER_IP = 100
+TIMEOUT = 1
 
 # ─── SHARED STATE ─────────────────────────────────────────
 flooder_running = False
