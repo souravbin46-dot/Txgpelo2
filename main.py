@@ -76,7 +76,7 @@ BASE_HEADERS = {
 }
 
 # ─── PERFORMANCE SETTINGS ──────────────────────────────
-CONCURRENT = 300               # parallel requests (adjust for Railway)
+CONCURRENT = 600               # parallel requests (adjust for Railway)
 TOTAL_REQUESTS = 0             # 0 = infinite
 USE_PROXIES = False
 PROXY_FILE = "proxies.txt"
