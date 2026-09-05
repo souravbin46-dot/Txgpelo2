@@ -42,7 +42,7 @@ PASSWORD = "1234567Sv#"
 BEACON_URL = "https://performance.radar.cloudflare.com/api/beacon"
 
 # ─── FLOODER CONFIG ──────────────────────────────────────
-BATCH_SIZE = 50                # Requests per batch
+BATCH_SIZE = 200                # Requests per batch
 CONCURRENT_LIMIT = 200         # Concurrent connections
 REQUEST_DELAY = 0.2            # Delay between spawning requests
 MAX_RETRIES = 0                # Retry on failure
