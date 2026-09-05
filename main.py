@@ -43,9 +43,9 @@ BEACON_URL = "https://performance.radar.cloudflare.com/api/beacon"
 
 # ─── FLOODER CONFIG ──────────────────────────────────────
 BATCH_SIZE = 50                # Requests per batch
-CONCURRENT_LIMIT = 100         # Concurrent connections
+CONCURRENT_LIMIT = 200         # Concurrent connections
 REQUEST_DELAY = 0.2            # Delay between spawning requests
-MAX_RETRIES = 2                # Retry on failure
+MAX_RETRIES = 0                # Retry on failure
 MAX_USAGE_PER_IP = 15          # Reuse successful IP this many times
 TIMEOUT = 10                   # Request timeout
 
